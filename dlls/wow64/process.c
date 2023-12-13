@@ -491,8 +491,18 @@ NTSTATUS WINAPI wow64_NtAssignProcessToJobObject( UINT *args )
  */
 NTSTATUS WINAPI wow64_NtContinue( UINT *args )
 {
+    return wow64_NtContinueEx( args );
+}
+
+
+/**********************************************************************
+ *           wow64_NtContinueEx
+ */
+NTSTATUS WINAPI wow64_NtContinueEx( UINT *args )
+{
     void *context = get_ptr( &args );
-    BOOLEAN alertable = get_ulong( &args );
+    CONTINUE_OPTIONS *options = get_ptr( &args );
+    BOOL alertable = options > (CONTINUE_OPTIONS *)0xFF ? options->ContinueFlags & CONTINUE_FLAG_DELIVER_APC : !!options;
 
     NtSetInformationThread( GetCurrentThread(), ThreadWow64Context,
                             context, get_machine_context_size( current_machine ));

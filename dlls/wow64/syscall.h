@@ -48,6 +48,7 @@
     SYSCALL_ENTRY( NtCompleteConnectPort ) \
     SYSCALL_ENTRY( NtConnectPort ) \
     SYSCALL_ENTRY( NtContinue ) \
+    SYSCALL_ENTRY( NtContinueEx ) \
     SYSCALL_ENTRY( NtCreateDebugObject ) \
     SYSCALL_ENTRY( NtCreateDirectoryObject ) \
     SYSCALL_ENTRY( NtCreateEvent ) \
