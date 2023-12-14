@@ -49,6 +49,10 @@
 #ifdef HAVE_SYS_UN_H
 #include <sys/un.h>
 #endif
+#include <sys/ioctl.h>
+#ifdef HAVE_LINUX_IOCTL_H
+#include <linux/ioctl.h>
+#endif
 #ifdef HAVE_SYS_PRCTL_H
 # include <sys/prctl.h>
 #endif
@@ -87,6 +91,22 @@
 #include "ddk/wdm.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(server);
+
+/* just in case... */
+#undef EXT2_IOC_GETFLAGS
+#undef EXT2_IOC_SETFLAGS
+#undef EXT4_CASEFOLD_FL
+
+#ifdef __linux__
+
+/* Define the ext2 ioctls for handling extra attributes */
+#define EXT2_IOC_GETFLAGS _IOR('f', 1, long)
+#define EXT2_IOC_SETFLAGS _IOW('f', 2, long)
+
+/* Case-insensitivity attribute */
+#define EXT4_CASEFOLD_FL 0x40000000
+
+#endif
 
 #ifndef MSG_CMSG_CLOEXEC
 #define MSG_CMSG_CLOEXEC 0
@@ -715,8 +735,27 @@ unsigned int server_wait( const select_op_t *select_op, data_size_t size, UINT f
  */
 NTSTATUS WINAPI NtContinue( CONTEXT *context, BOOLEAN alertable )
 {
+    /* NtContinueEx accepts both */
+    return NtContinueEx(context, (PCONTINUE_OPTIONS)(intptr_t)alertable);
+}
+
+
+/***********************************************************************
+ *              NtContinueEx  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtContinueEx( CONTEXT *context, PCONTINUE_OPTIONS options )
+{
     user_apc_t apc;
     NTSTATUS status;
+    BOOLEAN alertable;
+
+    if (options <= 0xff) {
+        alertable = (BOOLEAN)(intptr_t)options;
+    } else {
+        alertable = !!(options->ContinueFlags & CONTINUE_FLAG_TEST_ALERT);
+        /* FIXME: no idea how to handle rest of CONTINUE_OPTIONS stuff */
+        FIXME("NtContinueEx is not implemented!");
+    }
 
     if (alertable)
     {
@@ -1174,6 +1213,28 @@ static const char *init_server_dir( dev_t dev, ino_t ino )
 
 
 /***********************************************************************
+ *           set_case_insensitive
+ *
+ * Make the supplied directory case insensitive, if available.
+ */
+static void set_case_insensitive(const char *dir)
+{
+#if defined(EXT2_IOC_GETFLAGS) && defined(EXT2_IOC_SETFLAGS) && defined(EXT4_CASEFOLD_FL)
+    int flags, fd;
+
+    if ((fd = open(dir, O_RDONLY | O_NONBLOCK | O_LARGEFILE)) == -1)
+        return;
+    if (ioctl(fd, EXT2_IOC_GETFLAGS, &flags) != -1 && !(flags & EXT4_CASEFOLD_FL))
+    {
+        flags |= EXT4_CASEFOLD_FL;
+        ioctl(fd, EXT2_IOC_SETFLAGS, &flags);
+    }
+    close(fd);
+#endif
+}
+
+
+/***********************************************************************
  *           setup_config_dir
  *
  * Setup the wine configuration dir.
@@ -1209,6 +1270,7 @@ static int setup_config_dir(void)
     if (!mkdir( "dosdevices", 0777 ))
     {
         mkdir( "drive_c", 0777 );
+        set_case_insensitive( "drive_c" );
         symlink( "../drive_c", "dosdevices/c:" );
         symlink( "/", "dosdevices/z:" );
     }
