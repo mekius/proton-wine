@@ -807,17 +807,7 @@ static inline void set_sigcontext( const CONTEXT *context, ucontext_t *sigcontex
     RIP_sig(sigcontext) = context->Rip;
     CS_sig(sigcontext)  = context->SegCs;
     FS_sig(sigcontext)  = context->SegFs;
-    GS_sig(sigcontext)  = context->SegGs;
     EFL_sig(sigcontext) = context->EFlags;
-#ifdef DS_sig
-    DS_sig(sigcontext) = context->SegDs;
-#endif
-#ifdef ES_sig
-    ES_sig(sigcontext) = context->SegEs;
-#endif
-#ifdef SS_sig
-    SS_sig(sigcontext) = context->SegSs;
-#endif
 }
 
 
@@ -844,6 +834,16 @@ static inline void leave_handler( const ucontext_t *sigcontext )
 #ifdef __linux__
     if (fs32_sel && !is_inside_signal_stack( (void *)RSP_sig(sigcontext )) && !is_inside_syscall(sigcontext))
         __asm__ volatile( "movw %0,%%fs" :: "r" (fs32_sel) );
+#endif
+#ifdef DS_sig
+    DS_sig(sigcontext) = ds64_sel;
+#else
+    __asm__ volatile( "movw %0,%%ds" :: "r" (ds64_sel) );
+#endif
+#ifdef ES_sig
+    ES_sig(sigcontext) = ds64_sel;
+#else
+    __asm__ volatile( "movw %0,%%es" :: "r" (ds64_sel) );
 #endif
 }
 
@@ -879,23 +879,11 @@ static void save_context( struct xcontext *xcontext, const ucontext_t *sigcontex
     context->Rip    = RIP_sig(sigcontext);
     context->SegCs  = CS_sig(sigcontext);
     context->SegFs  = FS_sig(sigcontext);
-    context->SegGs  = GS_sig(sigcontext);
     context->EFlags = EFL_sig(sigcontext);
-#ifdef DS_sig
-    context->SegDs  = DS_sig(sigcontext);
-#else
-    __asm__("movw %%ds,%0" : "=m" (context->SegDs));
-#endif
-#ifdef ES_sig
-    context->SegEs  = ES_sig(sigcontext);
-#else
-    __asm__("movw %%es,%0" : "=m" (context->SegEs));
-#endif
-#ifdef SS_sig
-    context->SegSs  = SS_sig(sigcontext);
-#else
-    __asm__("movw %%ss,%0" : "=m" (context->SegSs));
-#endif
+    context->SegDs  = ds64_sel;
+    context->SegEs  = ds64_sel;
+    context->SegGs  = ds64_sel;
+    context->SegSs  = ds64_sel;
     context->Dr0    = amd64_thread_data()->dr0;
     context->Dr1    = amd64_thread_data()->dr1;
     context->Dr2    = amd64_thread_data()->dr2;
@@ -1048,15 +1036,6 @@ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
         frame->rbp    = context->Rbp;
         frame->rip    = context->Rip;
         frame->eflags = context->EFlags;
-        frame->cs     = context->SegCs;
-        frame->ss     = context->SegSs;
-    }
-    if (flags & CONTEXT_SEGMENTS)
-    {
-        frame->ds = context->SegDs;
-        frame->es = context->SegEs;
-        frame->fs = context->SegFs;
-        frame->gs = context->SegGs;
     }
     if (flags & CONTEXT_FLOATING_POINT)
     {
@@ -1131,16 +1110,16 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
         context->Rbp    = frame->rbp;
         context->Rip    = frame->rip;
         context->EFlags = frame->eflags;
-        context->SegCs  = frame->cs;
-        context->SegSs  = frame->ss;
+        context->SegCs  = cs64_sel;
+        context->SegSs  = ds64_sel;
         context->ContextFlags |= CONTEXT_CONTROL;
     }
     if (needed_flags & CONTEXT_SEGMENTS)
     {
-        context->SegDs  = frame->ds;
-        context->SegEs  = frame->es;
-        context->SegFs  = frame->fs;
-        context->SegGs  = frame->gs;
+        context->SegDs  = ds64_sel;
+        context->SegEs  = ds64_sel;
+        context->SegFs  = amd64_thread_data()->fs;
+        context->SegGs  = ds64_sel;
         context->ContextFlags |= CONTEXT_SEGMENTS;
     }
     if (needed_flags & CONTEXT_FLOATING_POINT)
@@ -1376,16 +1355,16 @@ NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
         context->Ebp    = wow_frame->Ebp;
         context->Eip    = wow_frame->Eip;
         context->EFlags = wow_frame->EFlags;
-        context->SegCs  = wow_frame->SegCs;
-        context->SegSs  = wow_frame->SegSs;
+        context->SegCs  = cs32_sel;
+        context->SegSs  = ds64_sel;
         context->ContextFlags |= CONTEXT_I386_CONTROL;
     }
     if (needed_flags & CONTEXT_I386_SEGMENTS)
     {
-        context->SegDs = wow_frame->SegDs;
-        context->SegEs = wow_frame->SegEs;
-        context->SegFs = wow_frame->SegFs;
-        context->SegGs = wow_frame->SegGs;
+        context->SegDs = ds64_sel;
+        context->SegEs = ds64_sel;
+        context->SegFs = amd64_thread_data()->fs;
+        context->SegGs = ds64_sel;
         context->ContextFlags |= CONTEXT_I386_SEGMENTS;
     }
     if (needed_flags & CONTEXT_I386_EXTENDED_REGISTERS)
@@ -2290,6 +2269,30 @@ static BOOL handle_syscall_trap( ucontext_t *sigcontext )
 
 
 /**********************************************************************
+ *    segv_handler_early
+ *
+ * Handler for SIGSEGV and related errors. Used only during the initialization
+ * of the process to handle virtual faults.
+ */
+static void segv_handler_early( int signal, siginfo_t *siginfo, void *sigcontext )
+{
+    ucontext_t *ucontext = sigcontext;
+
+    switch(TRAP_sig(ucontext))
+    {
+    case TRAP_x86_PAGEFLT:  /* Page fault */
+        if (!virtual_handle_fault( siginfo->si_addr, (ERROR_sig(ucontext) >> 1) & 0x09,
+                NULL ))
+            return;
+        /* fall-through */
+    default:
+        WINE_ERR( "Got unexpected trap %lld during process initialization\n", TRAP_sig(ucontext) );
+        abort_thread(1);
+        break;
+    }
+}
+
+/**********************************************************************
  *		segv_handler
  *
  * Handler for SIGSEGV and related errors.
@@ -2523,6 +2526,29 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *ucontext )
     }
 }
 
+/**********************************************************************
+ *    signal_init_early
+ */
+void signal_init_early(void)
+{
+    struct sigaction sig_act;
+
+    sig_act.sa_mask = server_block_set;
+    sig_act.sa_flags = SA_RESTART | SA_SIGINFO | SA_ONSTACK;
+
+    sig_act.sa_sigaction = segv_handler_early;
+    if (sigaction( SIGSEGV, &sig_act, NULL ) == -1) goto error;
+    if (sigaction( SIGILL, &sig_act, NULL ) == -1) goto error;
+#ifdef SIGBUS
+    if (sigaction( SIGBUS, &sig_act, NULL ) == -1) goto error;
+#endif
+
+    return;
+
+ error:
+    perror("sigaction");
+    exit(1);
+}
 
 /***********************************************************************
  *           LDT support
@@ -2881,11 +2907,11 @@ void DECLSPEC_HIDDEN call_init_thunk( LPTHREAD_START_ROUTINE entry, void *arg, B
         wow_context->Esp = get_wow_teb( teb )->Tib.StackBase - 16;
         wow_context->Eip = pLdrSystemDllInitBlock->pRtlUserThreadStart;
         wow_context->SegCs = cs32_sel;
-        wow_context->SegDs = context.SegDs;
-        wow_context->SegEs = context.SegEs;
-        wow_context->SegFs = context.SegFs;
-        wow_context->SegGs = context.SegGs;
-        wow_context->SegSs = context.SegSs;
+        wow_context->SegDs = ds64_sel;
+        wow_context->SegEs = ds64_sel;
+        wow_context->SegFs = thread_data->fs;
+        wow_context->SegGs = ds64_sel;
+        wow_context->SegSs = ds64_sel;
         wow_context->EFlags = 0x202;
         wow_context->FloatSave.ControlWord = context.u.FltSave.ControlWord;
         *(XSAVE_FORMAT *)wow_context->ExtendedRegisters = context.u.FltSave;
@@ -2911,6 +2937,8 @@ void DECLSPEC_HIDDEN call_init_thunk( LPTHREAD_START_ROUTINE entry, void *arg, B
     memset( frame, 0, sizeof(*frame) );
     NtSetContextThread( GetCurrentThread(), ctx );
 
+    frame->cs  = cs64_sel;
+    frame->ss  = ds64_sel;
     frame->rsp = (ULONG64)ctx - 8;
     frame->rip = (ULONG64)pLdrInitializeThunk;
     frame->rcx = (ULONG64)ctx;
